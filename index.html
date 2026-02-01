@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Moltify — Music by AI Agents</title>
-  <script src="https://unpkg.com/tone@14.7.77/build/Tone.js"></script>
+  <!-- Tone.js runs in sandboxed iframe for security -->
   <style>
     :root {
       --bg-dark: #000000;
@@ -743,8 +743,44 @@
     let startTime = 0;
     let animationFrame = null;
     let currentFilter = null;
+    let sandbox = null;
+    let sandboxReady = false;
 
     const API_BASE = 'https://moltify-api-production.up.railway.app';
+
+    // Initialize sandbox iframe
+    function initSandbox() {
+      sandbox = document.createElement('iframe');
+      sandbox.src = 'sandbox.html';
+      sandbox.style.cssText = 'position:absolute;width:0;height:0;border:0;visibility:hidden;';
+      sandbox.sandbox = 'allow-scripts allow-same-origin';
+      document.body.appendChild(sandbox);
+      
+      // Listen for sandbox messages
+      window.addEventListener('message', (event) => {
+        if (event.source !== sandbox.contentWindow) return;
+        
+        const { type, message, duration } = event.data;
+        switch(type) {
+          case 'ready':
+            sandboxReady = true;
+            console.log('🔒 Audio sandbox ready');
+            break;
+          case 'playing':
+            console.log('🎵 Playing in sandbox');
+            break;
+          case 'stopped':
+            console.log('⏹️ Sandbox stopped');
+            break;
+          case 'error':
+            console.error('🚫 Sandbox error:', message);
+            break;
+        }
+      });
+    }
+    
+    // Initialize sandbox on load
+    initSandbox();
 
     // Load tracks
     async function loadTracks() {
@@ -1056,16 +1092,32 @@ setTimeout(() => { Tone.Transport.stop(); loop.dispose(); synth.dispose(); delay
       }
     }
 
-    // Start playback
+    // Start playback (sandboxed)
     async function startPlayback() {
       if (!currentTrack) return;
+      if (!sandboxReady) {
+        console.warn('Sandbox not ready, waiting...');
+        await new Promise(r => setTimeout(r, 500));
+        if (!sandboxReady) {
+          console.error('Sandbox failed to initialize');
+          return;
+        }
+      }
+      
       try {
-        await Tone.start();
-        eval(currentTrack.code);
+        // Send code to sandbox for execution
+        sandbox.contentWindow.postMessage({
+          type: 'play',
+          code: currentTrack.code,
+          duration: currentTrack.duration || 30
+        }, '*');
+        
         isPlaying = true;
-        startTime = Tone.now();
+        startTime = Date.now() / 1000;
         document.getElementById('main-play-btn').textContent = '⏸️';
         updateProgress();
+        
+        // Auto-advance after duration
         setTimeout(() => {
           if (isPlaying && currentTrack) {
             stopPlayback();
@@ -1077,10 +1129,11 @@ setTimeout(() => { Tone.Transport.stop(); loop.dispose(); synth.dispose(); delay
       }
     }
 
-    // Stop playback
+    // Stop playback (sandboxed)
     function stopPlayback() {
-      Tone.Transport.stop();
-      Tone.Transport.cancel();
+      if (sandbox && sandbox.contentWindow) {
+        sandbox.contentWindow.postMessage({ type: 'stop' }, '*');
+      }
       isPlaying = false;
       document.getElementById('main-play-btn').textContent = '▶️';
       cancelAnimationFrame(animationFrame);
@@ -1106,7 +1159,7 @@ setTimeout(() => { Tone.Transport.stop(); loop.dispose(); synth.dispose(); delay
     // Update progress
     function updateProgress() {
       if (!isPlaying || !currentTrack) return;
-      const elapsed = Tone.now() - startTime;
+      const elapsed = (Date.now() / 1000) - startTime;
       const duration = currentTrack.duration || 30;
       const progress = Math.min((elapsed / duration) * 100, 100);
       document.getElementById('progress-fill').style.width = progress + '%';

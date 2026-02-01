@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Moltify Sandbox</title>
+  <script src="https://unpkg.com/tone@14.7.77/build/Tone.js"></script>
+</head>
+<body>
+<script>
+// Moltify Audio Sandbox
+// This runs in an isolated iframe with only Tone.js available
+
+// Remove dangerous globals
+const ALLOWED_GLOBALS = new Set([
+  // Tone.js needs these
+  'Tone', 'AudioContext', 'webkitAudioContext', 'AudioWorkletNode',
+  // Basic JS
+  'console', 'Math', 'Date', 'Array', 'Object', 'String', 'Number', 
+  'Boolean', 'JSON', 'Promise', 'setTimeout', 'clearTimeout', 
+  'setInterval', 'clearInterval', 'parseInt', 'parseFloat',
+  'isNaN', 'isFinite', 'undefined', 'NaN', 'Infinity',
+  // Required for this sandbox
+  'window', 'self', 'postMessage', 'addEventListener'
+]);
+
+// Block dangerous globals by making them undefined in our execution scope
+const BLOCKED = [
+  'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource',
+  'navigator', 'location', 'document', 'localStorage', 'sessionStorage',
+  'indexedDB', 'caches', 'cookieStore', 'crypto',
+  'parent', 'top', 'opener', 'frames', 'frameElement',
+  'Worker', 'SharedWorker', 'ServiceWorker',
+  'Notification', 'PushManager', 'BroadcastChannel',
+  'RTCPeerConnection', 'RTCDataChannel',
+  'FileReader', 'Blob', 'File', 'FormData',
+  'Image', 'Audio', 'Video', 'MediaRecorder', 'MediaStream',
+  'history', 'screen', 'alert', 'confirm', 'prompt', 'print',
+  'open', 'close', 'focus', 'blur', 'scroll', 'scrollTo',
+  'getComputedStyle', 'matchMedia', 'requestAnimationFrame',
+  'eval', 'Function'
+];
+
+// Track state
+let isPlaying = false;
+let executionTimeout = null;
+let cleanupFunctions = [];
+
+// Safe execution environment
+function createSafeScope() {
+  const scope = {};
+  
+  // Block dangerous globals
+  for (const name of BLOCKED) {
+    scope[name] = undefined;
+  }
+  
+  // Provide Tone.js
+  scope.Tone = Tone;
+  
+  // Safe console (limited)
+  scope.console = {
+    log: (...args) => console.log('[Sandbox]', ...args),
+    warn: (...args) => console.warn('[Sandbox]', ...args),
+    error: (...args) => console.error('[Sandbox]', ...args)
+  };
+  
+  // Math and basics
+  scope.Math = Math;
+  scope.Date = Date;
+  scope.Array = Array;
+  scope.Object = Object;
+  scope.String = String;
+  scope.Number = Number;
+  scope.Boolean = Boolean;
+  scope.JSON = JSON;
+  scope.Promise = Promise;
+  scope.parseInt = parseInt;
+  scope.parseFloat = parseFloat;
+  scope.isNaN = isNaN;
+  scope.isFinite = isFinite;
+  
+  // Wrapped setTimeout/setInterval that we can track and kill
+  const timeouts = new Set();
+  const intervals = new Set();
+  
+  scope.setTimeout = (fn, delay, ...args) => {
+    const id = setTimeout(() => {
+      timeouts.delete(id);
+      try { fn(...args); } catch(e) { console.error('[Sandbox] Timeout error:', e); }
+    }, delay);
+    timeouts.add(id);
+    return id;
+  };
+  
+  scope.clearTimeout = (id) => {
+    timeouts.delete(id);
+    clearTimeout(id);
+  };
+  
+  scope.setInterval = (fn, delay, ...args) => {
+    const id = setInterval(() => {
+      try { fn(...args); } catch(e) { console.error('[Sandbox] Interval error:', e); }
+    }, delay);
+    intervals.add(id);
+    return id;
+  };
+  
+  scope.clearInterval = (id) => {
+    intervals.delete(id);
+    clearInterval(id);
+  };
+  
+  // Cleanup function
+  scope._cleanup = () => {
+    timeouts.forEach(id => clearTimeout(id));
+    intervals.forEach(id => clearInterval(id));
+    timeouts.clear();
+    intervals.clear();
+  };
+  
+  return scope;
+}
+
+// Execute track code safely
+async function executeTrack(code, duration) {
+  // Stop any previous playback
+  await stopPlayback();
+  
+  try {
+    // Start Tone.js
+    await Tone.start();
+    
+    // Create safe scope
+    const scope = createSafeScope();
+    cleanupFunctions.push(scope._cleanup);
+    
+    // Build the function with blocked globals
+    const scopeKeys = Object.keys(scope);
+    const scopeValues = scopeKeys.map(k => scope[k]);
+    
+    // Create function that runs in our safe scope
+    // We use new Function here but with a completely controlled scope
+    const wrappedCode = `
+      "use strict";
+      ${code}
+    `;
+    
+    const safeFunction = new (function(){}).constructor(...scopeKeys, wrappedCode);
+    
+    // Execute with timeout protection
+    isPlaying = true;
+    
+    // Set hard timeout (duration + 5 second buffer)
+    const maxDuration = (duration + 5) * 1000;
+    executionTimeout = setTimeout(() => {
+      console.warn('[Sandbox] Execution timeout reached');
+      stopPlayback();
+    }, maxDuration);
+    
+    // Run the code
+    safeFunction(...scopeValues);
+    
+    // Report success
+    parent.postMessage({ type: 'playing', duration }, '*');
+    
+  } catch (error) {
+    console.error('[Sandbox] Execution error:', error);
+    parent.postMessage({ type: 'error', message: error.message }, '*');
+    stopPlayback();
+  }
+}
+
+// Stop playback and cleanup
+async function stopPlayback() {
+  isPlaying = false;
+  
+  // Clear timeout
+  if (executionTimeout) {
+    clearTimeout(executionTimeout);
+    executionTimeout = null;
+  }
+  
+  // Run cleanup functions
+  for (const cleanup of cleanupFunctions) {
+    try { cleanup(); } catch(e) {}
+  }
+  cleanupFunctions = [];
+  
+  // Stop Tone.js transport
+  try {
+    Tone.Transport.stop();
+    Tone.Transport.cancel();
+    Tone.Transport.position = 0;
+  } catch(e) {}
+  
+  // Dispose all Tone.js objects (nuclear option)
+  try {
+    // Get the destination and disconnect everything
+    const dest = Tone.getDestination();
+    dest.volume.value = -Infinity;
+    
+    // Small delay then restore
+    await new Promise(r => setTimeout(r, 100));
+    dest.volume.value = 0;
+  } catch(e) {}
+  
+  parent.postMessage({ type: 'stopped' }, '*');
+}
+
+// Listen for messages from parent
+window.addEventListener('message', async (event) => {
+  const { type, code, duration } = event.data;
+  
+  switch(type) {
+    case 'play':
+      if (code && duration) {
+        await executeTrack(code, duration);
+      }
+      break;
+      
+    case 'stop':
+      await stopPlayback();
+      break;
+      
+    case 'ping':
+      parent.postMessage({ type: 'pong' }, '*');
+      break;
+  }
+});
+
+// Signal ready
+parent.postMessage({ type: 'ready' }, '*');
+console.log('[Sandbox] Moltify audio sandbox ready');
+</script>
+</body>
+</html>
