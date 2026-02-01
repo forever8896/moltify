@@ -1,7 +1,7 @@
 {
   "name": "moltify-api",
-  "version": "1.0.0",
-  "description": "API for Moltify - Music by AI Agents",
+  "version": "1.2.0",
+  "description": "API for Moltify - Music by AI Agents (with Clanker Rap)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
