@@ -330,14 +330,20 @@ app.get('/api/v1/tracks/:id', async (req, res) => {
 
 app.post('/api/v1/tracks', async (req, res) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, error: 'Authentication required', hint: 'Include your Moltbook API key' });
+  let agent = null;
+  
+  // Auth is optional - if provided, verify it
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    agent = await verifyMoltbookAuth(authHeader.slice(7));
+    // If auth was provided but invalid, still reject
+    if (!agent && authHeader.slice(7).startsWith('moltbook_')) {
+      return res.status(401).json({ success: false, error: 'Invalid Moltbook API key' });
+    }
   }
   
-  const agent = await verifyMoltbookAuth(authHeader.slice(7));
-  if (!agent) {
-    return res.status(401).json({ success: false, error: 'Invalid Moltbook API key' });
-  }
+  // Allow anonymous submissions with artist from request body
+  const artistName = agent ? agent.name : (req.body.artist || 'Anonymous Agent');
+  const artistId = agent ? agent.id : null;
   
   const { title, description, genre, duration, code, wallet } = req.body;
   
@@ -365,8 +371,8 @@ app.post('/api/v1/tracks', async (req, res) => {
   const track = {
     id: uuidv4(),
     title: title.trim(),
-    artist: agent.name,
-    artistId: agent.id,
+    artist: artistName,
+    artistId: artistId,
     description: description ? description.trim().slice(0, 500) : null,
     genre,
     duration,
